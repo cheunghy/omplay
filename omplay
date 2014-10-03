@@ -1,0 +1,510 @@
+#!/bin/bash
+#
+#  Play user's iTunes Library without launching iTunes and
+#  related services.
+
+#           Declaration of variables
+App_Name="omplay 1.0.0"
+App_Version="\
+$App_Name
+" #The string to show when user specify --version option
+Usage="\
+Usage: $0 [--artist artist_name] [--album album_name]
+          [--random-play] [--repeat] [song_names ... ] [--version]    
+
+      -a --album
+      -r --artist
+      -m --random-play
+      -p --repeat\
+" #Usage string
+App_Help="\
+$App_Name
+This utility is used to play user's iTunes Library without launching
+iTunes and related services.
+$Usage\
+"
+User_iTunes_Music_Dir="$HOME/Music/iTunes/iTunes Media/Music"
+
+Did_Not_Find_iTunes_Directory='No iTunes Directory Found!\nAre you using Mac?'
+Did_Not_Find_Music='NO CONTENT.\nYou can download music from iTunes'
+
+#User option flag
+User_option_artist=0 #Will be 1 when the argument parser just find the option
+User_option_album=0 #Same as above
+User_option_random_play=0 #Indicate random play if -eq 1 otherwise 0
+User_option_repeat_play=0 #Indicate repeat play if -eq 1 otherwise 0
+
+#User option parameters
+User_param_artist=''
+User_param_album=''
+declare -a User_param_songs_array
+User_intend=''
+
+
+declare -a Omplay_artist_dir_array
+declare -a Omplay_album_dir_array
+declare -a Omplay_songs_file_array
+
+declare -a Omplay_artist_pretty_array
+declare -a Omplay_album_pretty_array
+declare -a Omplay_songs_pretty_array
+
+Afplay_ps_id=''
+declare -a Afplay_play_list
+
+##################################################################
+#       Functions Declare
+##################################################################
+
+function handle_SIGTSTP () {
+echo "Cz"
+}
+
+function handle_SIGINT () {
+    if [ ! -z $Afplay_ps_id ]
+    then
+    kill $Afplay_ps_id
+    fi
+}
+
+#Print functions, most will be call at command line parsing phase
+function print_usage () {
+    echo "$Usage"
+}
+
+function print_app_version () {
+    echo "$App_Version"
+}
+
+function print_app_help () {
+    echo "$App_Help"
+}
+
+#Exit functions
+function exit_nicely () {
+    exit 0
+}
+
+function exit_usage_error () {
+    print_usage
+    exit 1
+}
+
+function exit_no_iTunes_dir () {
+    echo "$Did_Not_Find_iTunes_Directory"
+    exit 2
+}
+
+function exit_no_artist_found () {
+    echo "Artist Not Found. You can search in iTunes store."
+    exit 3
+}
+
+function exit_no_album_found () {
+    echo "Album Not Found. You can search in iTunes store."
+    exit 4
+}
+
+function exit_no_song_found () {
+    echo "Song(s) Not Found. You can search in iTunes store."
+    exit 5
+}
+
+function exit_user_do_not_select () {
+    exit 6
+}
+
+#Command Line Parsing Functions
+
+function get_user_intend () {
+    echo "$User_intend"
+}
+
+function set_user_intend () {
+    if [ "$User_intend" == 'song' ]
+    then
+    return 0
+    else
+    if [ "$User_intend" == 'album' ]
+    then
+        return 0
+    else
+        User_intend=$1
+    fi
+    fi
+}
+
+function parse_long_arg () {
+
+    case $1 in
+    '--version' )
+            print_app_version
+            exit_nicely
+            ;;
+    '--help' )
+        print_app_help
+        exit_nicely
+        ;;
+        '--artist' )
+            User_option_artist=1
+            ;;
+    '--album' )
+        User_option_album=1
+        ;;
+    '--random-play' )
+        User_option_random_play=1
+        ;;
+    '--repeat' )
+        User_option_repeat_play=1
+        ;;
+    * )
+        exit_usage_error
+        ;;
+
+    esac    
+}
+
+function parse_short_arg () {
+    arg_array=($(echo "${1#-}" | sed 's/\(.\)/\1 /g'))
+    IFS=' '
+    for char in $arg_array
+    do
+
+    if [[ $char == a ]]
+    then
+        parse_long_arg '--album'
+    elif [[ $char == r ]] 
+    then
+            parse_long_arg '--artist'
+    elif [[ $char == m ]] 
+    then
+        parse_long_arg '--random-play'
+    elif [[ $char == p ]] 
+    then
+        parse_long_arg '--repeat'
+    else
+            parse_long_arg '--unknown'
+    fi
+
+    done
+}
+
+function parse_name_arg () {
+    if [ $User_option_artist -eq 1 ]
+    then
+    User_param_artist=$1
+    User_option_artist=0
+    set_user_intend 'artist'
+    elif [ $User_option_album -eq 1 ]
+    then
+    User_param_album=$1
+    User_option_album=0
+    set_user_intend 'album'
+    else
+    local i=${#User_param_songs_array[@]}
+    User_param_songs_array[$i]=$1
+    set_user_intend 'song'
+    fi
+}
+
+function parse_arguments () {
+
+    IFS=:
+    for arg in $@
+    do
+    if [[ $arg =~ --[a-z]* ]]
+    then parse_long_arg $arg
+    elif [[ $arg =~ -[a-z]* ]]
+    then parse_short_arg $arg
+    else 
+        parse_name_arg $arg
+    fi
+    done
+}
+
+function checking_iTunes_dir_availability () {
+    if [ ! -d "$User_iTunes_Music_Dir" ]
+    then
+    exit_no_iTunes_dir
+    else
+    return 0
+    fi
+}
+
+function needs_query_artist () {
+    [[ ! -z "$User_param_artist" ]]
+    return $?
+}
+
+function needs_query_album () {
+    [[ ! -z "$User_param_album" ]]
+    return $?
+}
+
+function needs_query_song () {
+    [[ ! "${#User_param_songs_array[@]}" -eq 0 ]]
+    return $?
+}
+
+function query_artist () {
+    IFS=$'\n'
+    local dir="$User_iTunes_Music_Dir"
+    local iname="*$User_param_artist*"
+    local result=( $(find $dir -type d -maxdepth 1 -iname $iname) )
+    if [ ${#result[@]} -eq 0 ]
+    then
+    exit_no_artist_found
+    else
+    declare -a pretty_result
+    for (( i=0 ; i < ${#result[@]} ; i++ ))
+    do
+        pretty_result[$i]=${result[$i]##*/}
+    done
+    Omplay_artist_dir_array=( ${result[@]} )
+    Omplay_artist_pretty_array=( ${pretty_result[@]} )
+    fi
+}
+
+function query_album () {
+    IFS=$'\n'
+    declare -a q_dir
+    local depth=''
+    declare -a a_dir
+    
+    if [ ! ${#Omplay_artist_dir_array[@]} -eq 0 ]
+    then
+    depth=1
+    q_dir=( ${Omplay_artist_dir_array[@]} )
+    else
+    depth=2
+    q_dir[0]="$User_iTunes_Music_Dir"
+    fi
+
+    for dir in ${q_dir[@]}
+    do
+    local iname="*$User_param_album*"
+    a_dir=( "${a_dir[@]}" $(find $dir -type d -mindepth $depth \
+-maxdepth $depth -iname "$iname" ) )
+    done
+    
+    if [ ${#a_dir[@]} -eq 0 ]
+    then 
+    exit_no_album_found
+    else
+    declare -a pretty_adir
+    for (( i=0 ; i < ${#a_dir[@]} ; i++ ))
+    do
+        pretty_adir[$i]=${a_dir##*/}
+    done
+    Omplay_album_dir_array=( ${a_dir[@]} )
+    Omplay_album_pretty_array=( ${pretty_adir[@]} )
+    fi
+}
+
+function query_song () {
+    IFS=$'\n'
+    declare -a q_dir
+    local depth=''
+    declare -a result
+    declare -a pretty_result
+
+    if [ ${#Omplay_album_dir_array[@]} -gt 0 ]
+    then
+    q_dir=( ${Omplay_album_dir_array[@]} )
+    depth=1
+    elif [ ${#Omplay_artist_dir_array[@]} -gt 0 ]
+    then
+    q_dir=( ${Omplay_artist_dir_array[@]} )
+    depth=2
+    else
+    q_dir[0]="$User_iTunes_Music_Dir"
+    depth=3
+    fi
+
+#Warning Now only one song at a time is supported
+    for song in ${User_param_songs_array[0]}
+    do
+    for dir in ${q_dir[@]}
+    do
+        result=( "${result[@]}" $( find $dir -type f -mindepth \
+$depth -maxdepth $depth -iname "*$song*[m][4p][a3]" ))
+    done
+    done
+
+    if [ ${#result[@]} -eq 0 ]
+    then
+    exit_no_song_found
+    else
+    for (( i=0 ; i < ${#result[@]} ; i++ ))
+    do
+        name=${result[$i]##*/}
+        name=${name%.mp3}
+        name=${name%.m4a}
+        pretty_result[$i]=$name        
+    done
+    fi
+
+    Omplay_songs_file_array=( ${result[@]} )
+    Omplay_songs_pretty_array=( ${pretty_result[@]} )
+}
+
+function perform_query () {
+    if needs_query_artist
+    then
+    query_artist
+    fi
+    if needs_query_album
+    then
+    query_album
+    fi
+    if needs_query_song
+    then
+    query_song
+    fi
+}
+
+#Prompting user to select
+function user_select () {
+    local term=''
+    declare -i count=1
+    string=''
+    for name in $@
+    do
+    string="$string $count) $name\t"
+    (( count++ ))
+    done
+
+    echo -e "${string}"
+    while true
+    do
+    read num
+    if [[ $num =~ *[]* ]]
+    then
+        exit_user_do_not_select
+    elif [[ $num =~ ^[1-9]*$ ]]
+        then
+        if [[ $num -le $# ]] && [[ $num -gt 0 ]]
+        then
+        break
+        else echo "Out of bounds."
+        fi
+    else echo "Input a number corresponding to the selection\
+, or you may type ^C to exit."
+    fi
+    done
+    (( num -= 1 ))
+    return $num
+}
+
+#Construcing user playlist
+
+function construct_user_playlist_with_one_song () {
+    if [ ${#Omplay_songs_file_array[@]} -gt 1 ]
+    then
+        prompt="Found ${#Omplay_songs_file_array[@]} songs, \
+Which one you want to play?"
+    echo $prompt
+        user_select ${Omplay_songs_pretty_array[@]}
+        num="$?"
+    Afplay_play_list[0]=${Omplay_songs_file_array[$num]}
+    else
+    Afplay_play_list[0]=${Omplay_songs_file_array[0]}
+    fi
+}
+
+function construct_user_playlist_with_one_album () {
+    IFS=$'\n'
+    dir=''
+    declare -a result
+    if [ ${#Omplay_album_dir_array[@]} -gt 1 ]
+    then
+    prompt="Found ${#Omplay_album_dir_array[@]} albums, \
+Which one you want to play?"
+    echo $prompt
+    user_select ${Omplay_album_pretty_array[@]}
+    num="$?"
+    dir=${Omplay_album_dir_array[$num]}
+    else
+    dir=${Omplay_album_dir_array[0]}
+    fi
+
+    result=( $(find $dir -iname "*.[m][4p][a3]" -maxdepth 1 -mindepth 1) )
+    Afplay_play_list=( ${result[@]} )
+}
+
+function construct_user_playlist_with_one_artist () {
+    IFS=$'\n'
+    dir=''
+    declare -a result
+    if [ ${#Omplay_artist_dir_array[@]} -gt 1 ]
+    then
+    prompt="Found ${#Omplay_artist_dir_array[@]} artists, \
+Which one you want to play?"
+    echo $prompt
+    user_select ${Omplay_artist_pretty_array[@]}
+    num="$?"
+    dir=${Omplay_artist_dir_array[$num]}
+    else
+    dir=${Omplay_artist_dir_array[0]}
+    fi
+
+    result=( $(find $dir -iname "*.[m][4p][a3]" -maxdepth 2 -mindepth 2) )
+    Afplay_play_list=( ${result[@]} )
+}
+
+function construct_user_playlist () {
+    if [ $User_intend == 'song' ]
+    then
+    construct_user_playlist_with_one_song
+    elif [ $User_intend == 'album' ]
+    then
+    construct_user_playlist_with_one_album
+    elif [ $User_intend == 'artist' ]
+    then
+    construct_user_playlist_with_one_artist
+    fi
+}
+
+function play_user_playlist () {
+    while true
+    do
+    
+    for (( i=0; i < ${#Afplay_play_list[@]} ; i++ ))
+    do
+        afplay ${Afplay_play_list[$i]} &
+        Afplay_ps_id="$!"
+        wait
+        Afplay_ps_id=''
+    done
+
+    if [ $User_option_repeat_play -eq 1 ]
+    then continue
+    else break 
+    fi
+    done
+
+    echo "Finished Playing! Thanks for use omplay!"
+}
+
+##################################################################
+#       Main Procedures 
+##################################################################
+
+#Signal handlers
+trap handle_SIGINT SIGINT #For keyboard C-c
+trap handle_SIGINT SIGTERM #For kill 
+trap handle_SIGTSTP SIGTSTP #For keyboard C-z
+
+#Checking if iTunes Dir is Available
+checking_iTunes_dir_availability
+
+#Parsing Command Line Options
+parse_arguments "$@"
+
+#Query Local iTunes Library Methods
+perform_query
+
+#Song Play
+construct_user_playlist
+play_user_playlist
+
